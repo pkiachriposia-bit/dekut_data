@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>DeKUT Mobile GIS Navigation</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0078ff">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>
+body { margin:0; font-family: Arial, sans-serif; background:#f2f2f2; }
+#frontPage, #mapContainer {
+  position:absolute; top:0; left:0; width:100%; height:100%;
+  background:#fff; display:flex; align-items:center; justify-content:center;
+  flex-direction:column; z-index:9999;
+}
+#frontPage h1 { margin-bottom:20px; }
+#accuracyDisplay { margin-bottom:20px; font-size:16px; }
+#frontPage button {
+  padding:10px 20px; font-size:16px; border:none;
+  background:#0078ff; color:#fff; border-radius:5px; cursor:pointer;
+}
+#panel{ padding:10px; background:#fff; display:flex; gap:6px; flex-wrap:wrap;}
+#panel input{ flex:1; padding:8px;}
+#panel button{
+  padding:8px 12px; border:none; background:#0078ff;
+  color:#fff; border-radius:4px; cursor:pointer;
+}
+#infoBoxes{ display:flex; gap:6px; padding:10px;}
+.infoBox{
+  background:#fff; padding:8px; border-radius:4px;
+  flex:1; font-size:14px; text-align:center;
+}
+#measureDistBox{ 
+  padding:8px 10px; background:#fff; margin:0 10px 10px 10px; 
+  border-radius:4px; font-weight:bold; display:flex; justify-content:space-between;
+  align-items:center;
+}
+#measureDistBox span { font-weight:normal; }
+#message{ padding:6px; font-weight:bold; }
+#map{ height:80vh; cursor: default; }
+.cursor-crosshair{ cursor: crosshair; }
+
+.measure-controls {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 1000;
+  background: white;
+  padding: 10px;
+  border-radius: 5px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+  display: none;
+}
+.measure-controls button {
+  margin: 2px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.measure-marker {
+  background: #0078ff;
+  color: white;
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  text-align: center;
+  line-height: 24px;
+  font-weight: bold;
+  font-size: 12px;
+  border: 2px solid white;
+  box-shadow: 0 0 5px rgba(0,0,0,0.5);
+}
+
+.measure-popup {
+  font-size: 14px;
+}
+
+/* Make GeoJSON layers non-interactive when measuring */
+.measuring-active .leaflet-interactive {
+  pointer-events: none !important;
+}
+</style>
+</head>
+<body>
+
+<div id="frontPage">
+  <h1>DeKUT Navigation Prototype</h1>
+  <p>Check GPS accuracy before starting navigation:</p>
+  <div id="accuracyDisplay">Waiting for location...</div>
+  <button id="okBtn" disabled onclick="startNavigation()">Start Navigation</button>
+</div>
+
+<div id="mapContainer" style="display:none;">
+  <div id="panel">
+    <input type="text" id="searchBox" placeholder="Search destination">
+    <button onclick="searchFeature()">Search</button>
+    <button onclick="locateUser()">My Location</button>
+    <button id="measureBtn">
+      <i class="fas fa-ruler"></i> Measure Distance
+    </button>
+  </div>
+
+  <div id="infoBoxes">
+    <div class="infoBox" id="latBox">Lat: --</div>
+    <div class="infoBox" id="lngBox">Lng: --</div>
+    <div class="infoBox" id="distBox">Distance to Destination: -- m</div>
+  </div>
+
+  <div id="measureDistBox">
+    <span>Measured Distance: -- m</span>
+    <button id="clearMeasureBtn" style="display:none; padding:3px 8px; font-size:12px;">
+      <i class="fas fa-times"></i> Clear
+    </button>
+  </div>
+  <div id="message"></div>
+  <div id="map"></div>
+  
+  <div class="measure-controls" id="measureControls">
+    <div><strong>Measure Mode Active</strong></div>
+    <button onclick="finishMeasuring()"><i class="fas fa-check"></i> Finish</button>
+    <button onclick="clearLastPoint()"><i class="fas fa-undo"></i> Undo Last</button>
+    <button onclick="cancelMeasuring()"><i class="fas fa-times"></i> Cancel</button>
+    <div style="font-size:11px; margin-top:5px; color:#666;">
+      Click to add points<br>
+      Double-click to finish
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/@turf/turf/turf.min.js"></script>
+
+<script>
+// ---------------- FRONT PAGE ----------------
+let accuracy, locationWatcher;
+function waitForAccuracy(){
+  if(!navigator.geolocation){
+    document.getElementById('accuracyDisplay').textContent="Geolocation not supported!";
+    return;
+  }
+  locationWatcher = navigator.geolocation.watchPosition(
+    pos=>{
+      accuracy = pos.coords.accuracy;
+      document.getElementById('accuracyDisplay').textContent =
+        `Current accuracy: ${accuracy.toFixed(1)} m`;
+      document.getElementById('okBtn').disabled=false;
+    },
+    err=>{
+      document.getElementById('accuracyDisplay').textContent = "Unable to get location: "+err.message;
+    },
+    { enableHighAccuracy:true, maximumAge:0, timeout:10000 }
+  );
+}
+waitForAccuracy();
+
+function startNavigation(){
+  if(accuracy>20){
+    if(!confirm(`Warning: GPS accuracy is low (${accuracy.toFixed(1)} m). Continue?`)) return;
+  }
+  document.getElementById('frontPage').style.display='none';
+  document.getElementById('mapContainer').style.display='block';
+  if(locationWatcher) navigator.geolocation.clearWatch(locationWatcher);
+  initializeMap();
+}
+
+// ---------------- MAP ----------------
+let map, userMarker, destinationMarker, routeLine;
+let boundaryLayer, roadsLayer, mainRoadsLayer;
+let buildingLayer, pitchLayer;
+let roadGraph={};
+let measurePoints=[], measureLine=null;
+let measureMarkers=[];
+let measuring=false;
+
+// GeoJSON URLs
+const boundaryURL="boundary.geojson";
+const buildingsURL="building.geojson";
+const mainRoadsURL="main_roads.geojson";
+const pitchURL="pitch.geojson";
+const roadsURL="roads.geojson";
+
+// ---------------- LOAD DATA ----------------
+function loadData(){
+  fetch(boundaryURL).then(r=>r.json()).then(data=>{
+    boundaryLayer=L.geoJSON(data,{
+      style:{color:"green",weight:2,fillOpacity:0},
+      interactive: false  // Make non-interactive
+    }).addTo(map);
+  });
+  fetch(roadsURL).then(r=>r.json()).then(data=>{
+    roadsLayer=L.geoJSON(data,{
+      style:{color:"#666",weight:2},
+      interactive: false  // Make non-interactive
+    }).addTo(map);
+    buildRoadGraph(data);
+  });
+  fetch(mainRoadsURL).then(r=>r.json()).then(data=>{
+    mainRoadsLayer=L.geoJSON(data,{
+      style:{color:"#000",weight:4},
+      interactive: false  // Make non-interactive
+    }).addTo(map);
+  });
+  fetch(buildingsURL).then(r=>r.json()).then(data=>{
+    buildingLayer=L.geoJSON(data,{
+      onEachFeature:(f,l)=>{
+        l.bindPopup("<b>Building:</b> "+(f.properties.name||"Unnamed"));
+        l.options.interactive = true;  // Keep interactive for popups
+      }
+    }).addTo(map);
+  });
+  fetch(pitchURL).then(r=>r.json()).then(data=>{
+    pitchLayer=L.geoJSON(data,{
+      style:{color:"orange"}, 
+      onEachFeature:(f,l)=>{
+        l.bindPopup("<b>Pitch:</b> "+(f.properties.name||"Pitch"));
+        l.options.interactive = true;  // Keep interactive for popups
+      }
+    }).addTo(map);
+  });
+}
+
+// ---------------- BUILD ROAD GRAPH ----------------
+function buildRoadGraph(geojson){
+  geojson.features.forEach(f=>{
+    const coords=f.geometry.coordinates;
+    for(let i=0;i<coords.length-1;i++){
+      const a=coords[i], b=coords[i+1];
+      const aKey=a.join(","), bKey=b.join(",");
+      const dist=turf.distance(turf.point(a),turf.point(b),{units:'meters'});
+      if(!roadGraph[aKey]) roadGraph[aKey]={};
+      if(!roadGraph[bKey]) roadGraph[bKey]={};
+      roadGraph[aKey][bKey]=dist; roadGraph[bKey][aKey]=dist;
+    }
+  });
+}
+
+// ---------------- DIJKSTRA ----------------
+function dijkstra(start,end){
+  let distances={}, prev={}, queue=new Set(Object.keys(roadGraph));
+  Object.keys(roadGraph).forEach(n=>distances[n]=Infinity);
+  distances[start]=0;
+  while(queue.size){
+    let u=[...queue].reduce((a,b)=>distances[a]<distances[b]?a:b);
+    queue.delete(u);
+    if(u===end) break;
+    Object.entries(roadGraph[u]).forEach(([v,dist])=>{
+      let alt=distances[u]+dist;
+      if(alt<distances[v]){ distances[v]=alt; prev[v]=u; }
+    });
+  }
+  let path=[], u=end;
+  while(u){ path.push(u.split(",").map(Number)); u=prev[u]; }
+  return path.reverse();
+}
+
+// ---------------- NEAREST NODE ----------------
+function nearestNode(point){
+  let nearest=null, minDist=Infinity;
+  Object.keys(roadGraph).forEach(k=>{
+    const n=k.split(",").map(Number);
+    const d=turf.distance(turf.point(point), turf.point(n), {units:'meters'});
+    if(d<minDist){ minDist=d; nearest=n; }
+  });
+  return nearest;
+}
+
+// ---------------- SEARCH DESTINATION ----------------
+function searchFeature(){
+  const q=document.getElementById("searchBox").value.toLowerCase();
+  let found=null;
+  [buildingLayer,pitchLayer].forEach(layer=>{
+    if(!layer) return;
+    layer.eachLayer(l=>{
+      const name=l.feature.properties.name;
+      if(name && name.toLowerCase().includes(q)) found=l;
+    });
+  });
+  if(found){
+    map.fitBounds(found.getBounds(),{maxZoom:18});
+    found.openPopup();
+    if(destinationMarker) map.removeLayer(destinationMarker);
+    const flagIcon=L.icon({iconUrl:'https://cdn-icons-png.flaticon.com/512/684/684908.png', iconSize:[30,30], iconAnchor:[15,30]});
+    destinationMarker=L.marker(found.getBounds().getCenter(),{icon:flagIcon}).addTo(map).bindPopup("Destination").openPopup();
+    drawRoute();
+  }
+}
+
+// ---------------- USER LOCATION ----------------
+function locateUser(){
+  if(!navigator.geolocation) return alert("Geolocation not supported!");
+  const blueIcon=L.icon({iconUrl:'https://cdn-icons-png.flaticon.com/512/64/64113.png', iconSize:[30,30], iconAnchor:[15,15]});
+  map.locate({enableHighAccuracy:true, watch:true});
+  map.on("locationfound", e=>{
+    if(userMarker) userMarker.setLatLng(e.latlng);
+    else userMarker=L.marker(e.latlng,{icon:blueIcon}).addTo(map).bindPopup("You are here").openPopup();
+    document.getElementById('latBox').textContent="Lat: "+e.latlng.lat.toFixed(6);
+    document.getElementById('lngBox').textContent="Lng: "+e.latlng.lng.toFixed(6);
+    if(destinationMarker) drawRoute();
+  });
+}
+
+// ---------------- DRAW ROUTE ----------------
+function drawRoute(){
+  if(!userMarker || !destinationMarker) return;
+  if(routeLine) map.removeLayer(routeLine);
+
+  const uLatLng=userMarker.getLatLng();
+  const dLatLng=destinationMarker.getLatLng();
+  const from=[uLatLng.lng,uLatLng.lat];
+  const to=[dLatLng.lng,dLatLng.lat];
+
+  const fromNode=nearestNode(from);
+  const toNode=nearestNode(to);
+
+  let pathCoords=[];
+
+  if(fromNode && toNode){
+    const roadPath=dijkstra(fromNode.join(","), toNode.join(","));
+    pathCoords=roadPath.map(c=>[c[1],c[0]]);
+    pathCoords.unshift([uLatLng.lat,uLatLng.lng]);
+    pathCoords.push([dLatLng.lat,dLatLng.lng]);
+  } else {
+    pathCoords=[[uLatLng.lat,uLatLng.lng],[dLatLng.lat,dLatLng.lng]];
+    document.getElementById('message').textContent="⚠ Outside road network, showing straight line.";
+  }
+
+  routeLine=L.polyline(pathCoords,{color:'red',weight:3}).addTo(map);
+
+  const dist=pathCoords.reduce((acc,c,i,arr)=>{
+    if(i===0) return 0;
+    return acc+turf.distance(turf.point([arr[i-1][1],arr[i-1][0]]), turf.point([c[1],c[0]]), {units:'meters'});
+  },0);
+  document.getElementById('distBox').textContent="Distance to Destination: "+dist.toFixed(1)+" m";
+}
+
+// ---------------- MEASURE DISTANCE FUNCTIONS ----------------
+function startMeasuring() {
+  measuring = true;
+  measurePoints = [];
+  
+  // Clear previous measurements
+  measureMarkers.forEach(m => map.removeLayer(m));
+  measureMarkers = [];
+  if(measureLine) map.removeLayer(measureLine);
+  
+  // Update UI
+  document.getElementById('measureBtn').innerHTML = '<i class="fas fa-ruler"></i> Measuring...';
+  document.getElementById('measureBtn').style.background = '#ff4444';
+  map.getContainer().classList.add("cursor-crosshair");
+  document.getElementById('measureControls').style.display = 'block';
+  document.getElementById('clearMeasureBtn').style.display = 'inline-block';
+  document.getElementById('measureDistBox').innerHTML = 
+    '<span>Click to add measurement points</span>' + 
+    '<button id="clearMeasureBtn" style="padding:3px 8px; font-size:12px;"><i class="fas fa-times"></i> Clear</button>';
+  
+  // Reattach clear button event
+  document.getElementById('clearMeasureBtn').onclick = clearMeasuring;
+  
+  // Add CSS class to disable pointer events on interactive layers
+  document.getElementById('mapContainer').classList.add('measuring-active');
+  
+  // Temporarily disable interactivity on building and pitch layers
+  if (buildingLayer) {
+    buildingLayer.eachLayer(function(layer) {
+      layer.options.interactive = false;
+    });
+  }
+  if (pitchLayer) {
+    pitchLayer.eachLayer(function(layer) {
+      layer.options.interactive = false;
+    });
+  }
+  
+  document.getElementById('message').textContent = "Measure mode: Click to add points. Double-click to finish.";
+}
+
+function addMeasurePoint(latlng) {
+  if (!measuring) return;
+  
+  measurePoints.push([latlng.lat, latlng.lng]);
+  
+  // Create numbered marker
+  const marker = L.marker(latlng, {
+    icon: L.divIcon({
+      className: 'measure-marker',
+      html: measurePoints.length.toString(),
+      iconSize: [24, 24]
+    })
+  }).addTo(map);
+  
+  // Add popup with coordinates
+  marker.bindPopup(`
+    <div class="measure-popup">
+      <strong>Point ${measurePoints.length}</strong><br>
+      Lat: ${latlng.lat.toFixed(6)}<br>
+      Lng: ${latlng.lng.toFixed(6)}<br>
+      ${measurePoints.length > 1 ? `Segment: ${calculateSegmentDistance(measurePoints.length-2, measurePoints.length-1).toFixed(1)} m` : ''}
+    </div>
+  `);
+  
+  measureMarkers.push(marker);
+  
+  // Update polyline
+  if (measureLine) map.removeLayer(measureLine);
+  if (measurePoints.length > 1) {
+    measureLine = L.polyline(measurePoints, {
+      color: '#0078ff',
+      weight: 3,
+      dashArray: '5, 5',
+      opacity: 0.8
+    }).addTo(map);
+  }
+  
+  // Calculate and display total distance
+  updateMeasureDistance();
+}
+
+function calculateSegmentDistance(index1, index2) {
+  if (index1 >= 0 && index2 < measurePoints.length) {
+    const point1 = turf.point([measurePoints[index1][1], measurePoints[index1][0]]);
+    const point2 = turf.point([measurePoints[index2][1], measurePoints[index2][0]]);
+    return turf.distance(point1, point2, {units: 'meters'});
+  }
+  return 0;
+}
+
+function updateMeasureDistance() {
+  if (measurePoints.length < 2) {
+    document.querySelector('#measureDistBox span').textContent = 
+      `Added ${measurePoints.length} point${measurePoints.length !== 1 ? 's' : ''}. Add more points.`;
+    return;
+  }
+  
+  let totalDistance = 0;
+  for (let i = 1; i < measurePoints.length; i++) {
+    const point1 = turf.point([measurePoints[i-1][1], measurePoints[i-1][0]]);
+    const point2 = turf.point([measurePoints[i][1], measurePoints[i][0]]);
+    totalDistance += turf.distance(point1, point2, {units: 'meters'});
+  }
+  
+  document.querySelector('#measureDistBox span').textContent = 
+    `Measured Distance: ${totalDistance.toFixed(1)} m (${measurePoints.length} points)`;
+}
+
+function clearLastPoint() {
+  if (measurePoints.length === 0) return;
+  
+  // Remove last marker
+  const lastMarker = measureMarkers.pop();
+  if (lastMarker) map.removeLayer(lastMarker);
+  
+  // Remove last point
+  measurePoints.pop();
+  
+  // Update remaining markers' numbers
+  measureMarkers.forEach((marker, index) => {
+    marker.setIcon(L.divIcon({
+      className: 'measure-marker',
+      html: (index + 1).toString(),
+      iconSize: [24, 24]
+    }));
+    
+    marker.bindPopup(`
+      <div class="measure-popup">
+        <strong>Point ${index + 1}</strong><br>
+        Lat: ${measurePoints[index][0].toFixed(6)}<br>
+        Lng: ${measurePoints[index][1].toFixed(6)}<br>
+        ${index > 0 ? `Segment: ${calculateSegmentDistance(index-1, index).toFixed(1)} m` : ''}
+      </div>
+    `);
+  });
+  
+  // Update polyline
+  if (measureLine) map.removeLayer(measureLine);
+  if (measurePoints.length > 1) {
+    measureLine = L.polyline(measurePoints, {
+      color: '#0078ff',
+      weight: 3,
+      dashArray: '5, 5',
+      opacity: 0.8
+    }).addTo(map);
+  }
+  
+  updateMeasureDistance();
+}
+
+function clearMeasuring() {
+  measuring = false;
+  measurePoints = [];
+  
+  measureMarkers.forEach(m => map.removeLayer(m));
+  measureMarkers = [];
+  if (measureLine) map.removeLayer(measureLine);
+  
+  document.querySelector('#measureDistBox span').textContent = "Measured Distance: -- m";
+  document.getElementById('clearMeasureBtn').style.display = 'none';
+}
+
+function finishMeasuring() {
+  if (measurePoints.length === 0) {
+    cancelMeasuring();
+    return;
+  }
+  
+  measuring = false;
+  map.getContainer().classList.remove("cursor-crosshair");
+  document.getElementById('measureControls').style.display = 'none';
+  document.getElementById('measureBtn').innerHTML = '<i class="fas fa-ruler"></i> Measure Distance';
+  document.getElementById('measureBtn').style.background = '#0078ff';
+  
+  // Remove CSS class and restore interactivity
+  document.getElementById('mapContainer').classList.remove('measuring-active');
+  
+  // Restore interactivity on building and pitch layers
+  if (buildingLayer) {
+    buildingLayer.eachLayer(function(layer) {
+      layer.options.interactive = true;
+    });
+  }
+  if (pitchLayer) {
+    pitchLayer.eachLayer(function(layer) {
+      layer.options.interactive = true;
+    });
+  }
+  
+  if (measurePoints.length > 0) {
+    document.getElementById('message').textContent = 
+      `Measurement completed with ${measurePoints.length} points. Total: ${calculateTotalDistance().toFixed(1)} m`;
+  }
+}
+
+function cancelMeasuring() {
+  clearMeasuring();
+  measuring = false;
+  map.getContainer().classList.remove("cursor-crosshair");
+  document.getElementById('measureControls').style.display = 'none';
+  document.getElementById('measureBtn').innerHTML = '<i class="fas fa-ruler"></i> Measure Distance';
+  document.getElementById('measureBtn').style.background = '#0078ff';
+  
+  // Remove CSS class and restore interactivity
+  document.getElementById('mapContainer').classList.remove('measuring-active');
+  
+  // Restore interactivity on building and pitch layers
+  if (buildingLayer) {
+    buildingLayer.eachLayer(function(layer) {
+      layer.options.interactive = true;
+    });
+  }
+  if (pitchLayer) {
+    pitchLayer.eachLayer(function(layer) {
+      layer.options.interactive = true;
+    });
+  }
+  
+  document.getElementById('message').textContent = "";
+}
+
+function calculateTotalDistance() {
+  if (measurePoints.length < 2) return 0;
+  
+  let total = 0;
+  for (let i = 1; i < measurePoints.length; i++) {
+    const point1 = turf.point([measurePoints[i-1][1], measurePoints[i-1][0]]);
+    const point2 = turf.point([measurePoints[i][1], measurePoints[i][0]]);
+    total += turf.distance(point1, point2, {units: 'meters'});
+  }
+  return total;
+}
+
+// ---------------- MAP EVENTS FOR MEASURING ----------------
+function setupMapEvents() {
+  // Use a single map click handler that works even when measuring
+  map.on('click', function(e) {
+    if (measuring) {
+      addMeasurePoint(e.latlng);
+    }
+  });
+  
+  // Double-click to finish measuring
+  map.on('dblclick', function(e) {
+    if (measuring) {
+      finishMeasuring();
+    }
+  });
+  
+  // Right-click to clear last point (optional)
+  map.on('contextmenu', function(e) {
+    if (measuring) {
+      e.originalEvent.preventDefault();
+      clearLastPoint();
+    }
+  });
+}
+
+// ---------------- MEASURE BUTTON EVENT ----------------
+document.getElementById("measureBtn").onclick = function() {
+  if (!measuring) {
+    startMeasuring();
+  } else {
+    finishMeasuring();
+  }
+};
+
+// ---------------- INITIALIZE MAP ----------------
+function initializeMap(){
+  map = L.map('map').setView([-0.3976, 36.9586], 16);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20}).addTo(map);
+  
+  setupMapEvents();
+  loadData(); 
+  locateUser();
+}
+
+// ---------------- SERVICE WORKER ----------------
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('sw.js')
+    .then(()=>console.log("Service Worker registered"))
+    .catch(err=>console.log("Service Worker registration failed:",err));
+}
+</script>
+</body>
+</html>
